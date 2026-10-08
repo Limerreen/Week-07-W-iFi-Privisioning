@@ -132,26 +132,61 @@ wifi_prov_mgr_endpoint_register("custom-data", custom_prov_data_handler, NULL);
 
 ## 6. กิจกรรมถอดรหัสซอร์สโค้ดและเขียนผังงาน (Code Deconstruction & Security Flow Assignment)
 
-ให้นักศึกษาแกะรอยการทำงานด้านความปลอดภัยและ Custom Handler ใน `main/main.c` แล้วเขียน **ผังการไหลของข้อมูล (Data Flow & Cryptographic Handshake Flow)**:
-
 ### ภารกิจที่ 1: ผังขั้นตอนการตรวจสอบ PoP (Security Handshake Decision Flow)
-ให้นักศึกษาวาด Flowchart แสดงการแลกเปลี่ยนคีย์และตรวจสอบสิทธิ์:
-1. การสร้าง Session Parameters ด้วยค่า PoP (`abcd1234`)
-2. เมื่อ Client ส่ง Public Key + Verification Hash มาให้ ESP32
-3. จุดแยกทางเลือก (Branching):
-   - หาก PoP ไม่ตรง $\rightarrow$ Trigger Event `PROTOCOMM_SECURITY_SESSION_CREDENTIALS_MISMATCH` และปฏิเสธการเชื่อมต่อ
-   - หาก PoP ถูกต้อง $\rightarrow$ Trigger Event `PROTOCOMM_SECURITY_SESSION_SETUP_OK` และสร้าง AES Session Key สำเร็จ
+
+```mermaid
+flowchart TD
+    Start([เริ่มต้นกระบวนการ Handshake]) --> SetupSec[ESP32 กำหนดค่า Security 1 พร้อม PoP: 'abcd1234']
+    SetupSec --> ClientReq[Client ส่ง Client Public Key + Verification Hash ผ่าน /prov-session]
+    
+    ClientReq --> CalcHash[ESP32 คำนวณ Shared Secret ผ่าน Curve25519<br>และคำนวณ Hash ยืนยันด้วย PoP ภายใน]
+    CalcHash --> VerifyCheck{Hash ที่คำนวณตรงกับ<br>Verification Data ของ Client หรือไม่?}
+    
+    VerifyCheck -- ไม่ตรง (PoP ผิดพลาด) --> MismatchEvent[Trigger Event:<br>PROTOCOMM_SECURITY_SESSION_CREDENTIALS_MISMATCH]
+    MismatchEvent --> LogError[แสดง Log: Received incorrect username and/or PoP!]
+    LogError --> RejectSession[ปฏิเสธ Session Handshake<br>และส่งสถานะ Error กลับไปยัง Client]
+    
+    VerifyCheck -- ตรงกัน (PoP ถูกต้อง) --> SetupOKEvent[Trigger Event:<br>PROTOCOMM_SECURITY_SESSION_SETUP_OK]
+    SetupOKEvent --> GenAESKey[สร้าง AES-CTR Session Key สำหรับเข้ารหัสข้อมูล]
+    GenAESKey --> SuccessSession[ส่ง Server Public Key + Confirmation กลับ Client<br>สร้างช่องทางสื่อสารเข้ารหัสสำเร็จ]
+```
+
+---
 
 ### ภารกิจที่ 2: ผังการรับส่งข้อมูลผ่าน Custom Endpoint (Custom Data Handler Flow)
-ให้นักศึกษาวาด Sequence / Data Flow ของฟังก์ชัน `custom_prov_data_handler()`:
-1. ข้อมูล `inbuf` ถูกส่งเข้ามาจากสมาร์ตโฟนผ่าน Protocomm
-2. การพิมพ์ข้อความ Log ด้วย `ESP_LOGI()`
-3. การจัดสรรหน่วยความจำแบบไดนามิกด้วย `strdup()` ให้กับ `*outbuf`
-4. ทำไมตัวแปร `*outbuf` จึงต้องจัดสรรใน Heap Memory (ทำไมจึงใช้ตัวแปร Local Static Array ธรรมดาไม่ได้)?
 
-```text
-[พื้นที่สำหรับแนบรูปภาพ Diagram ที่นักศึกษาเขียนขึ้นด้วย Draw.io / Mermaid / วาดมือ]
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Phone as สมาร์ตโฟน (App / Client)
+    participant Proto as Protocomm Layer (ESP32)
+    participant Handler as custom_prov_data_handler()
+    participant Heap as FreeRTOS Dynamic Heap
+
+    Phone->>Proto: ส่งข้อมูลเข้ารหัสผ่าน Endpoint "custom-data"
+    Proto->>Proto: ถอดรหัสเพย์โหลดด้วย AES-CTR Session Key
+    Proto->>Handler: เรียก Handler ส่งพารามิเตอร์ inbuf, inlen, &outbuf, &outlen
+    Handler->>Handler: พิมพ์ Log: ESP_LOGI("Received custom data: ...")
+
+    rect rgb(240, 248, 255)
+    Note over Handler, Heap: การจัดสรรหน่วยความจำสำหรับข้อมูลตอบกลับ (*outbuf)
+    Handler->>Heap: เรียก strdup("ACK_FROM_ESP32") เพื่อขอจัดสรรแรม
+    Heap-->>Handler: คืนค่าพอยน์เตอร์หน่วยความจำ Heap ให้กับ *outbuf
+    Handler->>Handler: กำหนดขนาด *outlen = strlen(response) + 1
+    end
+
+    Handler-->>Proto: return ESP_OK
+    Proto->>Proto: นำข้อมูลจาก *outbuf ไปเข้ารหัส (AES-CTR)
+    Proto->>Phone: ส่งแพ็กเก็ตตอบกลับ (Response ACK) ให้ Client
+
+    rect rgb(255, 235, 238)
+    Note over Proto, Heap: การคืนหน่วยความจำอัตโนมัติ (Memory Cleanup)
+    Proto->>Heap: เรียก free(*outbuf) ทันทีหลังส่งข้อมูลสำเร็จ
+    end
 ```
+
+> **เหตุผลที่ `*outbuf` ต้องจัดสรรใน Heap Memory:**
+> ฟังก์ชัน `custom_prov_data_handler()` ทำงานแบบ Asynchronous เมื่อ Handler ทำงานเสร็จและคืนค่า `return ESP_OK` ตัวแปร Local Stack ภายในฟังก์ชันจะถูกทำลายทิ้งทันที หากใช้ตัวแปร Local Stack หรือ Local Static Array ข้อมูลจะสูญหายหรือไม่ปลอดภัยเมื่อ Protocomm Layer นำพอยน์เตอร์ไปประมวลผลเข้ารหัสและส่งข้อมูลในภายหลัง ดังนั้นจึงจำเป็นต้องจองพื้นที่ใน **Heap Memory** (ผ่าน `strdup()` หรือ `malloc()`) เพื่อให้หน่วยความจำคงอยู่จนกระทั่ง Protocomm ส่งข้อมูลเข้าเน็ตเวิร์กเสร็จสิ้น แล้ว Protocomm จะทำหน้าที่สั่ง `free(*outbuf)` คืนสู่ระบบให้โดยอัตโนมัติ
 
 ---
 
@@ -159,15 +194,31 @@ wifi_prov_mgr_endpoint_register("custom-data", custom_prov_data_handler, NULL);
 
 | สถานการณ์ทดสอบ | ค่า PoP ที่ป้อน | ผลลัพธ์บนแอปมือถือ | ข้อความ Log ใน Serial Monitor |
 | :--- | :--- | :--- | :--- |
-| **1. ป้อน PoP ผิดพลาด** | `wrong1234` | | |
-| **2. ป้อน PoP ถูกต้อง** | `abcd1234` | | |
-| **3. ส่ง Custom Data** | `TEST_DATA_999` | | |
+| **1. ป้อน PoP ผิดพลาด** | `wrong1234` | แอปแจ้งเตือนข้อผิดพลาด: *Invalid Proof of Possession (PoP)* หรือ *Authentication Failed* และปฏิเสธไม่ให้ดำเนินการต่อ | `E (...) app: Received incorrect username and/or PoP for establishing secure session!` |
+| **2. ป้อน PoP ถูกต้อง** | `abcd1234` | ผ่านขั้นตอนการยืนยันตัวตนสำเร็จ เข้าสู่หน้าค้นหาและเลือกเครือข่าย Wi-Fi | `I (...) app: Secured session established!` |
+| **3. ส่ง Custom Data** | `TEST_DATA_999` (หรือ `STUDENT_ID:67030120`) | แอปแสดงสถานะส่งสำเร็จ และได้รับข้อความตอบกลับ `ACK_FROM_ESP32` | `I (...) app: Received custom data: TEST_DATA_999`<br>(พร้อมสร้าง response outbuf ส่งกลับ) |
 
 ---
 
 ## 8. คำถามท้ายการทดลอง (Post-Lab Questions)
-1. การใช้ **Proof-of-Possession (PoP)** ช่วยป้องกันการโจมตีประเภทใดได้บ้าง?
-2. หากไม่มีการใช้ PoP (เช่น ใน Security 0) ผู้โจมตีที่อยู่ในรัศมีสัญญาณบลูทูธสามารถทำสิ่งใดกับอุปกรณ์ได้บ้าง?
-3. ในการประยุกต์ใช้งานเชิงพาณิชย์จริง เราสามารถนำ **Custom Data Endpoint** ไปใช้ส่งข้อมูลประเภทใดได้อีกบ้าง (ยกตัวอย่าง 2 กรณี)?
-4. ในฟังก์ชัน `custom_prov_data_handler()` เหตุใดหน่วยความจำที่จัดสรรให้ `*outbuf` จึงถูก Free โดย Protocomm Layer อัตโนมัติหลังจากส่งข้อมูลเสร็จ?
 
+1. **การใช้ Proof-of-Possession (PoP) ช่วยป้องกันการโจมตีประเภทใดได้บ้าง?**
+   * **Man-in-the-Middle (MitM) Attacks:** ป้องกันไม่ให้ผู้ไม่หวังดีที่ดักจับสัญญาณวิทยุสามารถสร้าง Session หลอกหรือสวมรอยเป็น Client/Server ระหว่างการแลกเปลี่ยนคีย์ Curve25519 เนื่องจากผู้โจมตีไม่มีรหัสลับ PoP สำหรับยืนยันตัวตน
+   * **Rogue Provisioning / Device Hijacking:** ป้องกันบุคคลแปลกหน้าหรือผู้ไม่ได้รับอนุญาตที่อยู่ใกล้เคียง (เช่น เพื่อนบ้านหรือผู้ไม่หวังดีในรัศมีสัญญาณ BLE/SoftAP) แอบเชื่อมต่ออุปกรณ์แล้วส่ง Wi-Fi หลอกล่อเพื่อขโมยอุปกรณ์หรือนำอุปกรณ์ไปเกาะเข้าเครือข่ายอื่น
+   * **Brute-Force Connection Attempts:** ช่วยเพิ่มความปลอดภัยด้วยกระบวนการตรวจสอบสิทธิ์ก่อนที่จะยอมเปิดให้เข้าถึง Endpoint ภายในระบบ
+
+2. **หากไม่มีการใช้ PoP (เช่น ใน Security 0) ผู้โจมตีที่อยู่ในรัศมีสัญญาณบลูทูธสามารถทำสิ่งใดกับอุปกรณ์ได้บ้าง?**
+   * **ขโมยข้อมูลและดักฟัง (Sniffing Plaintext Credentials):** เนื่องจาก Security 0 ไม่มีการเข้ารหัสข้อมูล ผู้โจมตีที่ใช้เครื่องมือดักจับแพ็กเก็ต (เช่น Wireshark หรือ BLE Sniffer) สามารถดักอ่านชื่อเครือข่าย (SSID) และรหัสผ่าน Wi-Fi (Password) ได้แบบข้อความธรรมดา (Cleartext) ทันที
+   * **เข้าควบคุมและตั้งค่าอุปกรณ์โดยพลการ (Unauthorized Provisioning):** ใครก็ตามที่สแกนเจอสัญญาณสามารถส่งคำสั่งเชื่อมต่อ ยัดเยียด Wi-Fi Credentials ปลอม หรือส่ง Custom Data มุ่งร้ายเข้าสู่อุปกรณ์ได้ทันทีโดยไม่มีการขออนุญาต
+
+3. **ในการประยุกต์ใช้งานเชิงพาณิชย์จริง เราสามารถนำ Custom Data Endpoint ไปใช้ส่งข้อมูลประเภทใดได้อีกบ้าง (ยกตัวอย่าง 2 กรณี)?**
+   * **กรณีที่ 1: การลงทะเบียนอุปกรณ์และผูกบัญชีผู้ใช้ (Device Registration & Cloud Token Activation):**
+     * ส่งข้อมูล **User Account Token**, **Owner UUID**, หรือ **API Key** จากสมาร์ตโฟนไปยังอุปกรณ์ เพื่อให้อุปกรณ์สามารถยืนยันตัวตนและผูกเข้ากับบัญชีคลาวด์ของผู้ใช้ (เช่น AWS IoT Core หรือ Firebase) ได้ทันทีที่ต่อเน็ตเวิร์กสำเร็จ
+   * **กรณีที่ 2: การกำหนดค่าเซิร์ฟเวอร์เฉพาะขององค์กร (Private MQTT Broker URL & Enterprise Config):**
+     * ส่ง URL ของเซิร์ฟเวอร์ภายใน (`mqtt://internal-broker.local:1883`), พอร์ต หรือใบรับรองดิจิทัล (TLS Client Certificate) เพื่อให้อุปกรณ์สามารถทำงานร่วมกับระบบ On-Premise ภายในโรงงานหรืออาคารสำนักงานได้โดยไม่ต้องคอมไพล์โค้ดใหม่แยกรายตัว
+
+4. **ในฟังก์ชัน `custom_prov_data_handler()` เหตุใดหน่วยความจำที่จัดสรรให้ `*outbuf` จึงถูก Free โดย Protocomm Layer อัตโนมัติหลังจากส่งข้อมูลเสร็จ?**
+   * **การออกแบบตามหลัก Ownership Transfer ใน API ของ Protocomm:**
+     * เพื่อป้องกันปัญหา **หน่วยความจำรั่วไหล (Memory Leak)** ในระบบสมองกลฝังตัว
+     * ฟังก์ชัน Handler ของแอปพลิเคชันมีหน้าที่เพียงสร้างและส่งมอบสิทธิ์การถือครอง (Transfer Ownership) ของพอยน์เตอร์ `*outbuf` ให้แก่ Protocomm Layer
+     * เนื่องจากตัว Protocomm จำเป็นต้องใช้บัฟเฟอร์นี้ไปเข้ารหัสข้อมูลและส่งแพ็กเก็ตผ่านเน็ตเวิร์ก ซึ่งใช้เวลาแบบ Asynchronous หลังจากที่เฟรมข้อมูลถูกส่งออกทางวิทยุหรือทางซ็อกเก็ตเรียบร้อยแล้ว Protocomm Layer จึงมีหน้าที่เป็นผู้รับผิดชอบสุดท้ายในการสั่ง `free(*outbuf)` เพื่อคืนพื้นที่แรมกลับสู่ Heap อย่างถูกต้อง
