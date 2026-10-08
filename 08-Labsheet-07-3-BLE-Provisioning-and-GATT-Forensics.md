@@ -107,40 +107,106 @@ I (26120) app: Connected with IP Address: 192.168.1.155
 
 ## 5. กิจกรรมถอดรหัสซอร์สโค้ดและเขียนผังงาน (Code Deconstruction & BLE GATT Architecture Assignment)
 
-ให้นักศึกษาแกะรอยการทำงานของโมดูล BLE Provisioning ใน `main/main.c` แล้วเขียน **ผังโครงสร้างและลำดับเหตุการณ์**:
-
 ### ภารกิจที่ 1: ผังโครงสร้าง GATT Tree & Endpoint Mapping
-ให้นักศึกษาวาดโครงสร้างต้นไม้ (Tree Diagram / Block Diagram) แสดงความสัมพันธ์ระหว่าง:
-- **Primary Service (128-bit UUID: `021a9004-...`)**
-  - **Characteristic UUIDs** แต่ละตัว
-  - **Descriptor 0x2901 (User Description)** ที่ผูกเข้ากับ Protocomm Endpoints (`prov-session`, `prov-config`, `prov-scan`, `proto-ver`, `custom-data`)
+
+```mermaid
+graph TD
+    subgraph Primary_Service["Primary Service (128-bit UUID: 021a9004-0382-4aea-bff4-6b3f1c5adfb4)"]
+        direction TB
+        Char1["Characteristic: 0x0001 (Read/Write)"]
+        Char2["Characteristic: 0x0002 (Read/Write)"]
+        Char3["Characteristic: 0x0003 (Read/Write)"]
+        Char4["Characteristic: 0x0004 (Read/Write)"]
+        Char5["Characteristic: 0x0005 (Read/Write)"]
+        
+        Desc1["Descriptor 0x2901<br>User Description: 'proto-ver'"]
+        Desc2["Descriptor 0x2901<br>User Description: 'prov-session'"]
+        Desc3["Descriptor 0x2901<br>User Description: 'prov-config'"]
+        Desc4["Descriptor 0x2901<br>User Description: 'prov-scan'"]
+        Desc5["Descriptor 0x2901<br>User Description: 'custom-data'"]
+        
+        Char1 --> Desc1
+        Char2 --> Desc2
+        Char3 --> Desc3
+        Char4 --> Desc4
+        Char5 --> Desc5
+    end
+
+    classDef srv fill:#e1f5fe,stroke:#0288d1,stroke-width:2px;
+    classDef chr fill:#fff3e0,stroke:#f57c00,stroke-width:2px;
+    classDef dsc fill:#e8f5e9,stroke:#388e3c,stroke-width:2px;
+    
+    class Primary_Service srv;
+    class Char1,Char2,Char3,Char4,Char5 chr;
+    class Desc1,Desc2,Desc3,Desc4,Desc5 dsc;
+```
+
+---
 
 ### ภารกิจที่ 2: ผังลำดับการคืนหน่วยความจำ Bluetooth (BLE Lifecycle & Memory Reclaim Flow)
-ให้นักศึกษาวาด Flowchart / Sequence แสดงว่า:
-1. การเชื่อมต่อ BLE ถูกตรวจพบผ่าน Event `PROTOCOMM_TRANSPORT_BLE_CONNECTED` (LED 2 กระพริบเร็ว 100ms)
-2. เมื่อเชื่อมต่อ Wi-Fi สำเร็จ (`WIFI_PROV_CRED_SUCCESS`) $\rightarrow$ เกิด Event `WIFI_PROV_END`
-3. Provisioning Manager สั่งเรียก `esp_bt_mem_release()` เพื่อปล่อย DRAM คืนสู่ระบบอย่างไร
 
-```text
-[พื้นที่สำหรับแนบรูปภาพ Diagram ที่นักศึกษาเขียนขึ้นด้วย Draw.io / Mermaid / วาดมือ]
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as ผู้ใช้งาน (ESP BLE Prov App)
+    participant BLE as BLE Controller / Driver
+    participant ProvMgr as Provisioning Manager
+    participant Sys as ESP-IDF Memory Manager (Heap)
+
+    Note over ProvMgr: เริ่มต้น BLE Advertising (PROV_XXXXXX)<br>LED 2 กระพริบช้า (รอการเชื่อมต่อ)
+    User->>BLE: สแกนพบและเชื่อมต่อ BLE Connection
+    BLE-->>ProvMgr: Event: PROTOCOMM_TRANSPORT_BLE_CONNECTED
+    Note over ProvMgr: LED 2 กระพริบเร็ว (100ms) แสดงสถานะแลกเปลี่ยนข้อมูล
+
+    User->>ProvMgr: ทำ Security 1 Handshake & ส่ง Wi-Fi Credentials
+    ProvMgr-->>ProvMgr: ได้รับ Credentials -> สั่ง Wi-Fi Driver เชื่อมต่อ AP
+    ProvMgr-->>ProvMgr: เชื่อมต่อ AP สำเร็จ (Event: WIFI_PROV_CRED_SUCCESS)
+    
+    ProvMgr->>User: ส่งสถานะ Provisioning Success ผ่าน BLE
+    User->>BLE: ตัดการเชื่อมต่อ BLE (Disconnect)
+    ProvMgr-->>ProvMgr: Event: WIFI_PROV_END
+    
+    rect rgb(255, 235, 238)
+    Note over ProvMgr, Sys: กระบวนการคืนหน่วยความจำ Bluetooth (Memory Reclaim)
+    ProvMgr->>BLE: เรียก wifi_prov_mgr_deinit() เพื่อปิด Service
+    ProvMgr->>Sys: เรียก esp_bt_mem_release(ESP_BT_MODE_BLE)
+    Sys-->>Sys: ล้าง BT BSS/Data Sections และ BTM/HCI Buffers
+    Sys-->>Sys: รวมบล็อกหน่วยความจำกลับคืนสู่ Internal DRAM Heap (~60-100 KB)
+    Note over Sys: Serial Monitor: "BT memory released"<br>"BTDM memory released"
+    end
+    
+    Note over ProvMgr: ระบบเข้าสู่ Wi-Fi Station Mode ปกติพร้อมใช้งาน
 ```
 
 ---
 
 ## 6. ตารางบันทึกผลการทดลอง (Experiment Results)
 
-| รายการตรวจสอบ | ผลการทดลอง / ข้อมูลที่สังเกตได้ |
+| รายการตรวจสอบผลการทดลอง | ข้อมูลที่สังเกตได้ |
 | :--- | :--- |
-| **1. BLE Device Name ที่สแกนเจอ** | `PROV_`.............................. |
-| **2. Primary Service UUID (128-bit)** | ..................................................... |
-| **3. Characteristic Endpoint ที่พบ (0x2901)** | 1. ..................................................<br/>2. ..................................................<br/>3. .................................................. |
-| **4. พฤติกรรมไฟ LED 2 (GPIO 4) ช่วงรอ vs ช่วงต่อ BLE** | ช่วงรอ: .......................................<br/>ช่วงต่อ: ....................................... |
-| **5. พฤติกรรมเมื่อต่อ Wi-Fi สำเร็จ** | มี Log คืนหน่วยความจำ Bluetooth หรือไม่? (มี / ไม่มี) |
+| **1. BLE Device Name ที่สแกนเจอ** | `PROV_A1B2C3` (ขึ้นต้นด้วย PROV_ ตามด้วย MAC 3 ไบต์ท้าย) |
+| **2. Primary Service UUID (128-bit)** | `021a9004-0382-4aea-bff4-6b3f1c5adfb4` |
+| **3. Characteristic Endpoint ที่พบ (Descriptor 0x2901)** | 1. `prov-session`<br>2. `prov-config`<br>3. `custom-data` (รวมถึง `proto-ver` และ `prov-scan`) |
+| **4. พฤติกรรมไฟ LED 2 (GPIO 4) ช่วงรอ vs ช่วงต่อ BLE** | - **ช่วงรอเชื่อมต่อ:** กระพริบช้าเป็นจังหวะ (Slow Blink)<br>- **ช่วงต่อ BLE / ส่งข้อมูล:** เปลี่ยนเป็นกระพริบเร็วถี่ (Fast Blink 100ms) และติดค้างขณะประมวลผล |
+| **5. พฤติกรรมเมื่อต่อ Wi-Fi สำเร็จ** | **มี** ข้อความ Log รายงานชัดเจน:<br>`I (...) wifi_prov_scheme_ble: BT memory released`<br>`I (...) wifi_prov_scheme_ble: BTDM memory released` |
 
 ---
 
 ## 7. คำถามท้ายการทดลอง (Post-Lab Questions)
-1. เหตุใด BLE Provisioning จึงไม่ส่งผลให้สัญญาณ Wi-Fi บนสมาร์ตโฟนของผู้ใช้หลุดระหว่างทำรายการ?
-2. Descriptor `0x2901` มีความสำคัญอย่างไรต่อการที่แอปพลิเคชันมือถือจะทราบว่า Characteristic แต่ละตัวใช้ทำหน้าที่อะไร?
-3. การที่ ESP-IDF มีฟังก์ชัน `esp_bt_mem_release()` มีประโยชน์อย่างไรต่อการทำงานของแอปพลิเคชัน IoT หลังเชื่อมต่อ Wi-Fi สำเร็จ?
 
+1. **เหตุใด BLE Provisioning จึงไม่ส่งผลให้สัญญาณ Wi-Fi บนสมาร์ตโฟนของผู้ใช้หลุดระหว่างทำรายการ?**
+   * **การแยกช่องสัญญาณสื่อสารทางกายภาพ (Independent Physical Layer):**
+     * สมาร์ตโฟนเชื่อมต่อและส่งข้อมูลคอนฟิกไปยัง ESP32 ผ่านตัวรับส่งสัญญาณบลูทูธพลังงานต่ำ (**BLE Controller บนความถี่ 2.4 GHz**) ซึ่งทำงานเป็นอิสระจากชิปโมดูลและสแต็ก **Wi-Fi** ของโทรศัพท์
+     * แตกต่างจาก SoftAP Mode ที่บังคับให้มือถือต้องตัดการเชื่อมต่อจาก Wi-Fi Router หลักเพื่อมาเกาะ Access Point ของบอร์ด แต่สำหรับ BLE สมาร์ตโฟนยังคงรักษาการเชื่อมต่อ Wi-Fi ประจำบ้านหรือ Cellular Data 4G/5G และใช้งานอินเทอร์เน็ตได้ต่อเนื่องแบบไร้รอยต่อ
+
+2. **Descriptor 0x2901 มีความสำคัญอย่างไรต่อการที่แอปพลิเคชันมือถือจะทราบว่า Characteristic แต่ละตัวใช้ทำหน้าที่อะไร?**
+   * **การทำ Service Discovery และ Endpoint Binding (RFC GATT Standard):**
+     * รหัส `0x2901` คือมาตรฐาน Bluetooth SIG ที่เรียกว่า **Characteristic User Description Descriptor**
+     * ตัว Characteristic ภายใต้ Protocomm Primary Service มักใช้เลข 128-bit UUID แบบสุ่มหรือค่าตัวเลขลำดับ (เช่น UUID ...0001, ...0002) ซึ่งแอปพลิเคชันภายนอกไม่สามารถทราบความหมายได้โดยตรง
+     * เฟิร์มแวร์ ESP32 จึงแนบ Descriptor `0x2901` บรรจุสตริง ASCII เช่น `"prov-session"`, `"prov-config"`, หรือ `"custom-data"` ไว้ แอปมือถือ (เช่น ESP BLE Prov หรือ nRF Connect) เพียงแค่อ่านค่า Descriptor นี้ ก็จะรู้ได้ทันทีว่า Characteristic นี้คือท่อสื่อสาร (Endpoint Pipe) สำหรับส่งคีย์ความปลอดภัยหรือส่งข้อมูล Wi-Fi โดยไม่ต้อง Hardcode UUID ลงในแอป
+
+3. **การที่ ESP-IDF มีฟังก์ชัน `esp_bt_mem_release()` มีประโยชน์อย่างไรต่อการทำงานของแอปพลิเคชัน IoT หลังเชื่อมต่อ Wi-Fi สำเร็จ?**
+   * **การทวงคืนหน่วยความจำแรมอย่างมหาศาล (Heap Memory Reclaiming):**
+     * โปรโตคอลสแต็ก Bluetooth และบลูทูธคอนโทรลเลอร์ (BTDM/NimBLE/Bluedroid) กินพื้นที่หน่วยความจำแรม (Internal SRAM) ไปเป็นจำนวนมาก (ประมาณ **60 – 100 กิโลไบต์**)
+     * เมื่อกระบวนการ Provisioning จบลง อุปกรณ์ IoT ส่วนใหญ่จะใช้งานเพียง Wi-Fi เพื่อสื่อสารกับ Cloud/MQTT เท่านั้น และไม่มีความจำเป็นต้องใช้ Bluetooth อีกต่อไป
+     * การเรียก `esp_bt_mem_release(ESP_BT_MODE_BLE)` จะสั่งให้ระบบปลดล็อกพื้นที่หน่วยความจำ BSS/Data Section ของโมดูล Bluetooth ทั้งหมด แล้วส่งคืนกลับเข้าไปเป็น **Free Heap Memory** ให้กับแอปพลิเคชันหลัก ทำให้ ESP32 มีแรมว่างเหลือเพียงพอสำหรับงานที่ใช้หน่วยความจำสูง เช่น TLS/HTTPS Handshake, บัฟเฟอร์ JSON, หรือการประมวลผลเซนเซอร์
